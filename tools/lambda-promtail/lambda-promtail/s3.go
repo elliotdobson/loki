@@ -20,13 +20,22 @@ import (
 
 var (
 	// regex that parses the log file name fields
+	// AWS Application Load Balancers
 	// source:  https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-access-logs.html#access-log-file-format
 	// format:  bucket[/prefix]/AWSLogs/aws-account-id/elasticloadbalancing/region/yyyy/mm/dd/aws-account-id_elasticloadbalancing_region_app.load-balancer-id_end-time_ip-address_random-string.log.gz
 	// example: my-bucket/AWSLogs/123456789012/elasticloadbalancing/us-east-1/2022/01/24/123456789012_elasticloadbalancing_us-east-1_app.my-loadbalancer.b13ea9d19f16d015_20220124T0000Z_0.0.0.0_2et2e1mx.log.gz
-	filenameRegex = regexp.MustCompile(`AWSLogs\/(?P<account_id>\d+)\/elasticloadbalancing\/(?P<region>[\w-]+)\/(?P<year>\d+)\/(?P<month>\d+)\/(?P<day>\d+)\/\d+\_elasticloadbalancing\_\w+-\w+-\d_(?:(?:app|nlb)\.*?)?(?P<lb>[a-zA-Z0-9\-]+)`)
+	// AWS Network Load Balancers
+	// source:	https://docs.aws.amazon.com/elasticloadbalancing/latest/network/load-balancer-access-logs.html#access-log-file-format
+	// format:	bucket[/prefix]/AWSLogs/aws-account-id/elasticloadbalancing/region/yyyy/mm/dd/aws-account-id_elasticloadbalancing_region_net.load-balancer-id_end-time_random-string.log.gz
+	// example:	my-bucket/prefix/AWSLogs/123456789012/elasticloadbalancing/us-east-2/2016/05/01/123456789012_elasticloadbalancing_us-east-2_net.my-loadbalancer.1234567890abcdef_201605010000Z_2soosksi.log.gz
+	// AWS Classic Load Balancers
+	// source:	https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/access-log-collection.html#access-log-file-format
+	// format:	bucket[/prefix]/AWSLogs/aws-account-id/elasticloadbalancing/region/yyyy/mm/dd/aws-account-id_elasticloadbalancing_region_load-balancer-name_end-time_ip-address_random-string.log
+	// example:	my-loadbalancer-logs/my-app/AWSLogs/123456789012/elasticloadbalancing/us-west-2/2014/02/15/123456789012_elasticloadbalancing_us-west-2_my-loadbalancer_20140215T2340Z_172.160.001.192_20sg8hgm.log
+	filenameRegex = regexp.MustCompile(`AWSLogs\/(?P<account_id>\d+)\/elasticloadbalancing\/(?P<region>[\w-]+)\/(?P<year>\d+)\/(?P<month>\d+)\/(?P<day>\d+)\/\d+\_elasticloadbalancing\_\w+-\w+-\d_(?:(?:app|net)\.*?)?(?P<lb>[a-zA-Z0-9\-]+)`)
 
-	// regex that extracts the timestamp (RFC3339) from message log
-	timestampRegex = regexp.MustCompile(`\w+ (?P<timestamp>\d+-\d+-\d+T\d+:\d+:\d+\.\d+Z)`)
+	// regex that extracts the timestamp (ISO 8601 / RFC3339) from message log
+	timestampRegex = regexp.MustCompile(`\d+-\d+-\d+T\d+:\d+:\d+(\.\d+Z)?`)
 )
 
 func getS3Object(ctx context.Context, labels map[string]string) (io.ReadCloser, error) {
@@ -76,9 +85,14 @@ func parseS3Log(ctx context.Context, b *batch, labels map[string]string, obj io.
 
 	for scanner.Scan() {
 		log_line := scanner.Text()
-		match := timestampRegex.FindStringSubmatch(log_line)
+		var match []string
+		match = timestampRegex.FindStringSubmatch(log_line)
+		if match[1] == "" {
+			// NLB logs don't have .SSSSSSZ suffix. RFC3339 requires a TZ specifier, use UTC
+			match[0] += "Z"
+		}
 
-		timestamp, err := time.Parse(time.RFC3339, match[1])
+		timestamp, err := time.Parse(time.RFC3339, match[0])
 		if err != nil {
 			return err
 		}
