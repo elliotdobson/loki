@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -36,6 +37,9 @@ var (
 
 	// regex that extracts the timestamp (ISO 8601 / RFC3339) from message log
 	timestampRegex = regexp.MustCompile(`\d+-\d+-\d+T\d+:\d+:\d+(\.\d+Z)?`)
+
+	// regex that parses the Network Load Balancer log line
+	nlbLogLineRegex = regexp.MustCompile(`^(?P<type>\w+) (?P<version>[\w\.]+) (?P<time>\d+-\d+-\d+T\d+:\d+:\d+) (?P<elb>[\w\/-]+) (?P<listener>\w+) (?P<client_ip>(?:[0-9]{1,3}\.){3}[0-9]{1,3}):(?P<client_port>\d+) (?P<destination_ip>(?:[0-9]{1,3}\.){3}[0-9]{1,3}):(?P<destination_port>\d+) (?P<connection_time>\d+) (?P<tls_handshake_time>\d+|-) (?P<received_bytes>\d+) (?P<sent_bytes>\d+) (?P<incoming_tls_alert>\d+|-) (?P<chosen_cert_arn>[\w\-\:\/]+|-) - (?P<tls_cipher>[\w-]+|-) (?P<tls_protocol_version>\w+|-) - (?P<domain_name>[\w\-\.]+|-) (?P<alpn_fe_protocol>\w+|-) (?P<alpn_be_protocol>\w+|-) (?P<alpn_client_preference_list>[\w",\/\.]+|-)$`)
 )
 
 func getS3Object(ctx context.Context, labels map[string]string) (io.ReadCloser, error) {
@@ -86,22 +90,57 @@ func parseS3Log(ctx context.Context, b *batch, labels map[string]string, obj io.
 	for scanner.Scan() {
 		log_line := scanner.Text()
 		var match []string
-		match = timestampRegex.FindStringSubmatch(log_line)
-		if match[1] == "" {
-			// NLB logs don't have .SSSSSSZ suffix. RFC3339 requires a TZ specifier, use UTC
-			match[0] += "Z"
-		}
+		mapped_log_line := make(map[string]string)
+		match = nlbLogLineRegex.FindStringSubmatch(log_line)
+		if match != nil {
+			fmt.Println("parseS3Log: Converting log line to JSON")
+			for i, name := range nlbLogLineRegex.SubexpNames() {
+				if i != 0 && name != "" {
+					mapped_log_line[name] = match[i]
+				}
+			}
 
-		timestamp, err := time.Parse(time.RFC3339, match[0])
-		if err != nil {
-			return err
-		}
+			json_log_line, err := json.Marshal(mapped_log_line)
+			if err != nil {
+				fmt.Println(err)
+			}
 
-		if err := b.add(ctx, entry{ls, logproto.Entry{
-			Line:      log_line,
-			Timestamp: timestamp,
-		}}); err != nil {
-			return err
+			match = timestampRegex.FindStringSubmatch(log_line)
+			if match[1] == "" {
+				// NLB logs don't have .SSSSSSZ suffix. RFC3339 requires a TZ specifier, use UTC
+				match[0] += "Z"
+			}
+
+			timestamp, err := time.Parse(time.RFC3339, match[0])
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			if err := b.add(ctx, entry{ls, logproto.Entry{
+				Line:      string(json_log_line),
+				Timestamp: timestamp,
+			}}); err != nil {
+				fmt.Println(err)
+			}
+		} else {
+			fmt.Println("parseS3Log: Log line as-is")
+			match = timestampRegex.FindStringSubmatch(log_line)
+			if match[1] == "" {
+				// NLB logs don't have .SSSSSSZ suffix. RFC3339 requires a TZ specifier, use UTC
+				match[0] += "Z"
+			}
+
+			timestamp, err := time.Parse(time.RFC3339, match[0])
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			if err := b.add(ctx, entry{ls, logproto.Entry{
+				Line:      log_line,
+				Timestamp: timestamp,
+			}}); err != nil {
+				fmt.Println(err)
+			}
 		}
 	}
 
